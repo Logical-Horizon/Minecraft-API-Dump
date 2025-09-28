@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  # 任务 1: 创建草稿 Release (已增加自动清理功能)
+  # 任务 1: 创建草稿 Release (无改动)
   create-draft:
     runs-on: ubuntu-latest
     outputs:
@@ -20,19 +20,14 @@ jobs:
       - name: Get current date
         id: date
         run: echo "TAG_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-      
-      # 新增步骤: 尝试删除前一次失败留下的同名 Release/Tag
       - name: Clean up previous failed run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="weekly-${{ env.TAG_DATE }}"
           echo "Checking for and deleting existing release with tag $TAG"
-          # 删除 Release，如果存在的话。--yes 会跳过确认
           gh release delete "$TAG" --yes || echo "No previous release to delete."
-          # 删除关联的 Git 标签，如果存在的话
           git push origin --delete "$TAG" || echo "No previous tag to delete."
-
       - name: Create Draft Release
         id: create_release
         uses: softprops/action-gh-release@v2
@@ -46,7 +41,9 @@ jobs:
             - **NeoForge**: Per-Major.Minor-version-group archives from the Maven repository.
           draft: true
 
-  # 任务 2: 并行处理 Forge
+  # ===================================================================
+  # 任务 2: 并行处理 Forge (已简化日志)
+  # ===================================================================
   process-forge:
     runs-on: ubuntu-latest
     needs: create-draft
@@ -73,7 +70,8 @@ jobs:
               if [[ -n "$DOWNLOAD_URL" ]]; then
                 FILENAME=$(basename "$DOWNLOAD_URL")
                 echo "Downloading: $FILENAME"
-                wget -P "$TEMP_DIR/" "$DOWNLOAD_URL" || echo "  -> Download failed: $FILENAME"
+                # 关键改动: 增加 -nv 参数来静默进度条
+                wget -nv -P "$TEMP_DIR/" "$DOWNLOAD_URL" || echo "  -> FAILED: $FILENAME"
               fi
             done
 
@@ -94,7 +92,7 @@ jobs:
             rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
           done
 
-  # 任务 3: 并行处理 Fabric
+  # 任务 3: 并行处理 Fabric (无改动)
   process-fabric:
     runs-on: ubuntu-latest
     needs: create-draft
@@ -107,20 +105,18 @@ jobs:
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
           echo "--- Starting Fabric Incremental Processing ---"
-          # 步骤 1: 单独处理 Installer
           echo "Processing Fabric Installer..."
           INSTALLER_VERSION=$(curl -s https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml | grep -oP '<latest>\K[^<]+')
           INSTALLER_URL="https://maven.fabricmc.net/net/fabricmc/fabric-installer/${INSTALLER_VERSION}/fabric-installer-${INSTALLER_VERSION}.jar"
           TEMP_DIR_INSTALLER="fabric_installer_temp"
           mkdir -p "$TEMP_DIR_INSTALLER"
-          wget -P "$TEMP_DIR_INSTALLER/" "$INSTALLER_URL"
+          wget -nv -P "$TEMP_DIR_INSTALLER/" "$INSTALLER_URL"
           ARCHIVE_NAME_INSTALLER="fabric-installer.tar.xz"
           tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME_INSTALLER" -C "$TEMP_DIR_INSTALLER" .
           echo "Uploading $ARCHIVE_NAME_INSTALLER"
           gh release upload "$TAG" "$ARCHIVE_NAME_INSTALLER" --clobber
           rm -rf "$TEMP_DIR_INSTALLER" "$ARCHIVE_NAME_INSTALLER"
           
-          # 步骤 2: 分组处理 API
           echo "--- Group Processing for Fabric APIs ---"
           ALL_TAGS=$(gh release list -R FabricMC/fabric -L 2000 --json tagName -q '.[].tagName')
           MC_VERSION_GROUPS=$(echo "$ALL_TAGS" | grep -oP '\+\K\d+\.\d+' | sort -u)
@@ -152,7 +148,9 @@ jobs:
             rm -rf "$TEMP_DIR_API" "$ARCHIVE_NAME_API"
           done
   
-  # 任务 4: 并行处理 NeoForge
+  # ===================================================================
+  # 任务 4: 并行处理 NeoForge (已简化日志)
+  # ===================================================================
   process-neoforge:
     runs-on: ubuntu-latest
     needs: create-draft
@@ -173,20 +171,23 @@ jobs:
             TEMP_DIR="neoforge_temp_${GROUP}"
             mkdir -p "$TEMP_DIR"
             for FULL_VERSION in $(echo "$ALL_VERSIONS" | grep "^${GROUP}"); do
-              echo "  -> Found version: $FULL_VERSION"
+              echo "  -> Downloading files for version: $FULL_VERSION"
               INSTALLER_URL="https://maven.neoforged.net/releases/net/neoforged/neoforge/${FULL_VERSION}/neoforge-${FULL_VERSION}-installer.jar"
               UNIVERSAL_URL="https://maven.neoforged.net/releases/net/neoforged/neoforge/${FULL_VERSION}/neoforge-${FULL_VERSION}-universal.jar"
-              wget -P "$TEMP_DIR/" "$INSTALLER_URL" || echo "     - No installer found for $FULL_VERSION"
-              wget -P "$TEMP_DIR/" "$UNIVERSAL_URL" || echo "     - No universal found for $FULL_VERSION"
+              
+              # 关键改动: 增加 -nv 参数来静默进度条
+              wget -nv -P "$TEMP_DIR/" "$INSTALLER_URL" || echo "     - FAILED: Installer for $FULL_VERSION"
+              wget -nv -P "$TEMP_DIR/" "$UNIVERSAL_URL" || echo "     - FAILED: Universal for $FULL_VERSION"
             done
             if [ -z "$(ls -A "$TEMP_DIR")" ]; then rm -rf "$TEMP_DIR"; continue; fi
             ARCHIVE_NAME="neoforge-${GROUP}.tar.xz"
+            echo "Archiving to $ARCHIVE_NAME"
             tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
             gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
             rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
           done
 
-  # 任务 5: 发布 Release
+  # 任务 5: 发布 Release (无改动)
   publish-release:
     runs-on: ubuntu-latest
     needs: [process-forge, process-fabric, process-neoforge]
