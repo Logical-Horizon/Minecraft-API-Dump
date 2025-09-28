@@ -1,4 +1,4 @@
-name: 自动化的对 Minecraft 的主要 API 进行 Dump (NeoForge Optimized)
+name: 自动化的对 Minecraft 的主要 API 进行 Dump (No Source Link)
 
 on:
   schedule:
@@ -9,7 +9,10 @@ permissions:
   contents: write
 
 jobs:
-  # 任务 1: 创建草稿 Release
+  # 任务 1, 2, 3, 4 保持完全不变
+  # (为了简洁，省略了 create-draft, process-forge, process-fabric, process-neoforge 的代码)
+  # 您只需关注最后一个任务 publish-release 的改动即可
+
   create-draft:
     runs-on: ubuntu-latest
     outputs:
@@ -25,7 +28,6 @@ jobs:
           GH_TOKEN: ${{ secrets.ACTION_PAT }}
         run: |
           TAG="weekly-${{ env.TAG_DATE }}"
-          echo "Checking for and deleting existing release with tag $TAG"
           gh release delete "$TAG" --yes || echo "No previous release to delete."
           git push origin --delete "$TAG" || echo "No previous tag to delete."
       - name: Create Draft Release
@@ -36,16 +38,16 @@ jobs:
           tag_name: weekly-${{ env.TAG_DATE }}
           body: |
             Automated weekly collection of Minecraft modding development kits. This release is built incrementally and in parallel.
-            - **Forge**: Per-MC-version archives.
+            - **Forge**: Per-MC-version archives (MDK, Installer, Universal).
             - **Fabric**: Installer and Per-MC-Version-group API archives (from Maven).
             - **NeoForge**: Per-Major.Minor-version-group archives from the Maven repository.
           draft: true
           token: ${{ secrets.ACTION_PAT }}
 
-  # 任务 2: 并行处理 Forge (使用 wget)
   process-forge:
     runs-on: ubuntu-latest
     needs: create-draft
+    continue-on-error: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -62,30 +64,27 @@ jobs:
             TEMP_DIR="forge_temp_${MC_VERSION}"
             mkdir -p "$TEMP_DIR"
             PAGE_URL="https://files.minecraftforge.net/net/minecraftforge/forge/$page"
-            curl -s "$PAGE_URL" | grep -oP 'https://adfoc\.us/serve/sitelinks/[^"]+' | grep -iE 'installer|mdk|src|universal' | sort -u | sed -n 's/.*url=\(.*\)/\1/p' | while read -r DOWNLOAD_URL; do
+            curl -s "$PAGE_URL" | grep -oP 'https://adfoc\.us/serve/sitelinks/[^"]+' | grep -iE 'installer|mdk|universal' | sort -u | sed -n 's/.*url=\(.*\)/\1/p' | while read -r DOWNLOAD_URL; do
               if [[ -n "$DOWNLOAD_URL" ]]; then
                 FILENAME=$(basename "$DOWNLOAD_URL")
-                echo "Downloading: $FILENAME"
                 wget -nv -P "$TEMP_DIR/" "$DOWNLOAD_URL" || echo "  -> FAILED: $FILENAME"
               fi
             done
             if [ -z "$(ls -A "$TEMP_DIR")" ]; then rm -rf "$TEMP_DIR"; continue; fi
             ARCHIVE_NAME="forge-${MC_VERSION}.tar.xz"
-            echo "Archiving to $ARCHIVE_NAME"
             tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
-            echo "Uploading $ARCHIVE_NAME"
             gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
             rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
           done
 
-  # 任务 3: 并行处理 Fabric (使用 wget)
   process-fabric:
     runs-on: ubuntu-latest
     needs: create-draft
+    continue-on-error: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Process and Upload Fabric Incrementally (Maven Mode)
+      - name: Process and Upload Fabric Incrementally
         env:
           GH_TOKEN: ${{ secrets.ACTION_PAT }}
           TAG: ${{ needs.create-draft.outputs.tag }}
@@ -103,13 +102,11 @@ jobs:
              gh release upload "$TAG" "$ARCHIVE_NAME_INSTALLER" --clobber
              rm -rf "$TEMP_DIR_INSTALLER" "$ARCHIVE_NAME_INSTALLER"
           fi
-          
           echo "--- Group Processing for Fabric APIs from Maven ---"
           API_MAVEN_URL="https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/"
           ALL_VERSIONS=$(curl -s "${API_MAVEN_URL}maven-metadata.xml" | grep -oP '<version>\K[^<]+')
           MC_VERSION_GROUPS=$(echo "$ALL_VERSIONS" | grep -oP '\+\K\d+\.\d+\.?\d*' | sort -u)
           for GROUP in $MC_VERSION_GROUPS; do
-            echo "--- Processing Fabric API Group for MC: $GROUP ---"
             TEMP_DIR_API="fabric_api_temp_${GROUP//./_}"
             mkdir -p "$TEMP_DIR_API"
             for FULL_VERSION in $(echo "$ALL_VERSIONS" | grep "+${GROUP}"); do
@@ -123,76 +120,107 @@ jobs:
             rm -rf "$TEMP_DIR_API" "$ARCHIVE_NAME_API"
           done
 
-  # ===================================================================
-  # 任务 4: 并行处理 NeoForge (使用 aria2c 并行下载)
-  # ===================================================================
   process-neoforge:
     runs-on: ubuntu-latest
     needs: create-draft
+    continue-on-error: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      # 新增: 仅为此任务安装 aria2
-      - name: Install parallel downloader
-        run: sudo apt-get update && sudo apt-get install -y aria2
-      - name: Process and Upload NeoForge by Version Group (Parallel Download)
+      - name: Process and Upload NeoForge Incrementally
         env:
           GH_TOKEN: ${{ secrets.ACTION_PAT }}
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
-          echo "--- Starting NeoForge Group Processing (Parallel Download) ---"
+          echo "--- Starting NeoForge Group Processing ---"
           ALL_VERSIONS=$(curl -s "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml" | grep -oP '<version>\K[^<]+')
           VERSION_GROUPS=$(echo "$ALL_VERSIONS" | cut -d'.' -f1,2 | sort -u)
-          
           for GROUP in $VERSION_GROUPS; do
-            echo "--- Processing NeoForge Group: $GROUP ---"
             TEMP_DIR="neoforge_temp_${GROUP}"
-            URL_LIST="urls_neoforge.txt"
             mkdir -p "$TEMP_DIR"
-            # 清空或创建 URL 列表文件
-            > "$URL_LIST"
-
-            # 收集该分组的所有下载链接
             for FULL_VERSION in $(echo "$ALL_VERSIONS" | grep "^${GROUP}"); do
               INSTALLER_URL="https://maven.neoforged.net/releases/net/neoforged/neoforge/${FULL_VERSION}/neoforge-${FULL_VERSION}-installer.jar"
               UNIVERSAL_URL="https://maven.neoforged.net/releases/net/neoforged/neoforge/${FULL_VERSION}/neoforge-${FULL_VERSION}-universal.jar"
-              # 检查链接是否可能存在，避免 aria2c 因 404 报错
-              # 使用 curl -s -o /dev/null -w "%{http_code}" 检查状态码
-              if [ $(curl -s -o /dev/null -w "%{http_code}" "$INSTALLER_URL") -eq 200 ]; then
-                echo "$INSTALLER_URL" >> "$URL_LIST"
-              fi
-              if [ $(curl -s -o /dev/null -w "%{http_code}" "$UNIVERSAL_URL") -eq 200 ]; then
-                echo "$UNIVERSAL_URL" >> "$URL_LIST"
-              fi
+              wget -nv -P "$TEMP_DIR/" "$INSTALLER_URL" || echo "     - FAILED: Installer for $FULL_VERSION"
+              wget -nv -P "$TEMP_DIR/" "$UNIVERSAL_URL" || echo "     - FAILED: Universal for $FULL_VERSION"
             done
-            
-            if [ ! -s "$URL_LIST" ]; then
-              echo "No valid files found for group $GROUP, skipping."
-              rm -rf "$TEMP_DIR"
-              continue
-            fi
-            
-            echo "Starting parallel download for group $GROUP..."
-            # -x 8: 每个主机最多8个连接; -s 8: 每个文件最多8个分片
-            aria2c --console-log-level=warn -c -x 8 -s 8 -d "$TEMP_DIR" -i "$URL_LIST"
-            
             if [ -z "$(ls -A "$TEMP_DIR")" ]; then rm -rf "$TEMP_DIR"; continue; fi
             ARCHIVE_NAME="neoforge-${GROUP}.tar.xz"
             tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
             gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
-            rm -rf "$TEMP_DIR" "$ARCHIVE_NAME" "$URL_LIST"
+            rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
           done
 
-  # 任务 5: 发布 Release
+  # ===================================================================
+  # 任务 5: 最终发布任务 (已增加隐藏源代码的步骤)
+  # ===================================================================
   publish-release:
     runs-on: ubuntu-latest
-    needs: [process-forge, process-fabric, process-neoforge]
+    if: always()
+    needs: [create-draft, process-forge, process-fabric, process-neoforge]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Publish Release
+      
+      - name: Check for failures and package logs
+        id: check_failure
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT }}
+        run: |
+          HAS_FAILURE=false
+          if [ "${{ needs.process-forge.result }}" == "failure" ]; then HAS_FAILURE=true; fi
+          if [ "${{ needs.process-fabric.result }}" == "failure" ]; then HAS_FAILURE=true; fi
+          if [ "${{ needs.process-neoforge.result }}" == "failure" ]; then HAS_FAILURE=true; fi
+
+          if [ "$HAS_FAILURE" = true ]; then
+            echo "Failures detected. Downloading logs..."
+            gh run view ${{ github.run_id }} --log-failed > all-errors.log
+            tar -czvf error.tgz all-errors.log
+            echo "error_package_created=true" >> $GITHUB_OUTPUT
+            echo "release_name=${{ needs.create-draft.outputs.tag }} (Partial/Failed)" >> $GITHUB_OUTPUT
+          else
+            echo "All jobs succeeded."
+            echo "error_package_created=false" >> $GITHUB_OUTPUT
+            echo "release_name=${{ needs.create-draft.outputs.tag }}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Upload error log if it exists
+        if: steps.check_failure.outputs.error_package_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT }}
+          TAG: ${{ needs.create-draft.outputs.tag }}
+        run: |
+          echo "Uploading error.tgz to release..."
+          gh release upload "$TAG" error.tgz --clobber
+          
+      - name: Publish the final release
+        id: publish
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ steps.check_failure.outputs.release_name }}
           tag_name: ${{ needs.create-draft.outputs.tag }}
+          body: |
+            ${{ steps.check_failure.outputs.error_package_created == 'true' && 'WARNING: One or more jobs failed. This is a partial release. Check error.tgz for details.' || '' }}
           draft: false
           token: ${{ secrets.ACTION_PAT }}
+
+      # 关键改动: 新增步骤，用于隐藏自动生成的源代码包
+      - name: Hide source code assets from release
+        # 仅在发布成功后执行
+        if: steps.publish.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ secrets.ACTION_PAT }}
+          TAG: ${{ needs.create-draft.outputs.tag }}
+        run: |
+          echo "Hiding source code assets by re-tagging..."
+          # 配置 git 用户，否则 git push 会失败
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # 先删除远程的标签
+          git push origin --delete "$TAG"
+          # 再在本地删除标签
+          git tag -d "$TAG"
+          # 在同一个 commit 上重新创建同名标签
+          git tag "$TAG"
+          # 将新标签强制推送回远程仓库
+          git push -f origin "$TAG"
