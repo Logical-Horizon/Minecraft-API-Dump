@@ -12,6 +12,12 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     steps:
+      # =====================================================
+      # 关键修正: 在所有操作之前，先检出仓库代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      # =====================================================
+
       # 步骤 1: 获取日期并创建 Release 草稿
       - name: Get current date
         id: date
@@ -33,6 +39,8 @@ jobs:
 
       # 步骤 2: 增量处理 Forge
       - name: Process and Upload Forge Incrementally
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "--- Starting Forge Incremental Processing ---"
           INDEX_PAGES=$(curl -s https://files.minecraftforge.net/net/minecraftforge/forge/ | grep -oP 'href="(index_[^"]+\.html)"' | sed 's/href="\([^"]*\)"/\1/')
@@ -73,8 +81,6 @@ jobs:
             rm -rf "$TEMP_DIR"
             rm "$ARCHIVE_NAME"
           done
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # 步骤 3: 增量处理 Fabric
       - name: Process and Upload Fabric Incrementally
@@ -124,7 +130,8 @@ jobs:
           wget -r -np -nH --cut-dirs=4 -R "index.html*" -P "$FULL_DIR/" https://maven.neoforged.net/releases/net/neoforged/neoforge/
           
           echo "Download complete. Starting to archive and upload per version..."
-          for version_dir in "$FULL_DIR"/*/; do
+          # 使用 find 命令来更稳定地处理目录
+          find "$FULL_DIR" -mindepth 1 -maxdepth 1 -type d | while read -r version_dir; do
             VERSION=$(basename "$version_dir")
             echo "--- Processing NeoForge Version: $VERSION ---"
             ARCHIVE_NAME="neoforge-${VERSION}.tar.xz"
