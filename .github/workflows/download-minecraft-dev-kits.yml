@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  # 任务 1: 创建草稿 Release (无改动)
+  # 任务 1: 创建草稿 Release (更新了 body 描述)
   create-draft:
     runs-on: ubuntu-latest
     outputs:
@@ -29,8 +29,8 @@ jobs:
           body: |
             Automated weekly collection of Minecraft modding development kits. This release is built incrementally and in parallel.
             - **Forge**: Per-MC-version archives.
-            - **Fabric**: Installer and Per-API-version archives.
-            - **NeoForge**: Per-version archives from the Maven repository.
+            - **Fabric**: Installer and Per-MC-Version-group API archives.
+            - **NeoForge**: Per-Major.Minor-version-group archives from the Maven repository.
           draft: true
 
   # 任务 2: 并行处理 Forge (无改动)
@@ -81,7 +81,9 @@ jobs:
             rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
           done
 
-  # 任务 3: 并行处理 Fabric (无改动)
+  # ===================================================================
+  # 任务 3: 并行处理 Fabric (已更新为分组打包逻辑)
+  # ===================================================================
   process-fabric:
     runs-on: ubuntu-latest
     needs: create-draft
@@ -94,81 +96,87 @@ jobs:
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
           echo "--- Starting Fabric Incremental Processing ---"
+          # 步骤 1: 单独处理 Installer (逻辑不变)
           echo "Processing Fabric Installer..."
           INSTALLER_VERSION=$(curl -s https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml | grep -oP '<latest>\K[^<]+')
           INSTALLER_URL="https://maven.fabricmc.net/net/fabricmc/fabric-installer/${INSTALLER_VERSION}/fabric-installer-${INSTALLER_VERSION}.jar"
-          TEMP_DIR="fabric_installer_temp"
-          mkdir -p "$TEMP_DIR"
-          wget -P "$TEMP_DIR/" "$INSTALLER_URL"
-          ARCHIVE_NAME="fabric-installer.tar.xz"
-          tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
-          echo "Uploading $ARCHIVE_NAME"
-          gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
-          rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
+          TEMP_DIR_INSTALLER="fabric_installer_temp"
+          mkdir -p "$TEMP_DIR_INSTALLER"
+          wget -P "$TEMP_DIR_INSTALLER/" "$INSTALLER_URL"
+          ARCHIVE_NAME_INSTALLER="fabric-installer.tar.xz"
+          tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME_INSTALLER" -C "$TEMP_DIR_INSTALLER" .
+          echo "Uploading $ARCHIVE_NAME_INSTALLER"
+          gh release upload "$TAG" "$ARCHIVE_NAME_INSTALLER" --clobber
+          rm -rf "$TEMP_DIR_INSTALLER" "$ARCHIVE_NAME_INSTALLER"
           
-          echo "Processing Fabric APIs..."
-          gh release list -R FabricMC/fabric -L 2000 --json tagName -q '.[].tagName' | while read tag; do
-            echo "--- Processing Fabric API Version: $tag ---"
-            TEMP_DIR="fabric_api_temp_${tag}"
-            gh release download "$tag" -R FabricMC/fabric -p 'fabric-api-*.jar' --dir "$TEMP_DIR" --clobber || { echo "No assets found for $tag, skipping."; continue; }
-            if [ -z "$(ls -A "$TEMP_DIR")" ]; then rm -rf "$TEMP_DIR"; continue; fi
-            ARCHIVE_NAME="fabric-api-${tag}.tar.xz"
-            tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
-            echo "Uploading $ARCHIVE_NAME"
-            gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
-            rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
+          # 步骤 2: 分组处理 API
+          echo "--- Group Processing for Fabric APIs ---"
+          # 2.1: 获取所有 API 的 tag
+          ALL_TAGS=$(gh release list -R FabricMC/fabric -L 2000 --json tagName -q '.[].tagName')
+          
+          # 2.2: 从 tag 中提取 MC 版本，再提取 major.minor 分支，最后去重
+          MC_VERSION_GROUPS=$(echo "$ALL_TAGS" | grep -oP '\+\K\d+\.\d+' | sort -u)
+          
+          # 2.3: 遍历每一个 MC 版本分支
+          for GROUP in $MC_VERSION_GROUPS; do
+            echo "--- Processing Fabric API Group for MC: $GROUP ---"
+            TEMP_DIR_API="fabric_api_temp_${GROUP//./_}"
+            mkdir -p "$TEMP_DIR_API"
+            
+            # 2.4: 找到所有属于该分支的 tag，并下载它们的 API 文件
+            for FULL_TAG in $(echo "$ALL_TAGS" | grep "+${GROUP}"); do
+              echo "  -> Found tag: $FULL_TAG"
+              gh release download "$FULL_TAG" -R FabricMC/fabric -p 'fabric-api-*.jar' --dir "$TEMP_DIR_API" --clobber || echo "     - No assets found for $FULL_TAG"
+            done
+            
+            if [ -z "$(ls -A "$TEMP_DIR_API")" ]; then
+              echo "No files downloaded for group $GROUP, skipping."
+              rm -rf "$TEMP_DIR_API"
+              continue
+            fi
+            
+            ARCHIVE_NAME_API="fabric-api-${GROUP}.tar.xz"
+            echo "Archiving to $ARCHIVE_NAME_API"
+            tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME_API" -C "$TEMP_DIR_API" .
+            
+            echo "Uploading $ARCHIVE_NAME_API"
+            gh release upload "$TAG" "$ARCHIVE_NAME_API" --clobber
+            
+            echo "Cleaning up local files for group $GROUP"
+            rm -rf "$TEMP_DIR_API" "$ARCHIVE_NAME_API"
           done
   
-  # ===================================================================
-  # 任务 4: 并行处理 NeoForge (已按您的要求重写)
-  # ===================================================================
+  # 任务 4: 并行处理 NeoForge (无改动)
   process-neoforge:
     runs-on: ubuntu-latest
     needs: create-draft
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Process and Upload NeoForge Incrementally (via maven-metadata.xml)
+      - name: Process and Upload NeoForge by Version Group
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
-          echo "--- Starting NeoForge Incremental Processing (maven-metadata.xml mode) ---"
+          echo "--- Starting NeoForge Group Processing ---"
+          ALL_VERSIONS=$(curl -s "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml" | grep -oP '<version>\K[^<]+')
+          VERSION_GROUPS=$(echo "$ALL_VERSIONS" | cut -d'.' -f1,2 | sort -u)
           
-          # 从 maven-metadata.xml 获取所有版本号
-          VERSIONS=$(curl -s "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml" | grep -oP '<version>\K[^<]+')
-          
-          for VERSION in $VERSIONS; do
-            echo "--- Processing NeoForge Version: $VERSION ---"
-            
-            TEMP_DIR="neoforge_temp_${VERSION}"
+          for GROUP in $VERSION_GROUPS; do
+            echo "--- Processing NeoForge Group: $GROUP ---"
+            TEMP_DIR="neoforge_temp_${GROUP}"
             mkdir -p "$TEMP_DIR"
-
-            # 拼接下载链接
-            INSTALLER_URL="https://maven.neoforged.net/releases/net/neoforged/neoforge/${VERSION}/neoforge-${VERSION}-installer.jar"
-            UNIVERSAL_URL="https://maven.neoforged.net/releases/net/neoforged/neoforge/${VERSION}/neoforge-${VERSION}-universal.jar"
-            
-            # 下载文件
-            echo "Downloading installer for $VERSION..."
-            wget -P "$TEMP_DIR/" "$INSTALLER_URL" || echo "  -> No installer found for $VERSION"
-            echo "Downloading universal for $VERSION..."
-            wget -P "$TEMP_DIR/" "$UNIVERSAL_URL" || echo "  -> No universal found for $VERSION"
-            
-            # 检查是否有文件被下载
-            if [ -z "$(ls -A "$TEMP_DIR")" ]; then
-              echo "No files downloaded for $VERSION, skipping."
-              rm -rf "$TEMP_DIR"
-              continue
-            fi
-            
-            ARCHIVE_NAME="neoforge-${VERSION}.tar.xz"
-            echo "Archiving to $ARCHIVE_NAME"
+            for FULL_VERSION in $(echo "$ALL_VERSIONS" | grep "^${GROUP}"); do
+              echo "  -> Found version: $FULL_VERSION"
+              INSTALLER_URL="https://maven.neoforged.net/releases/net/neoforged/neoforge/${FULL_VERSION}/neoforge-${FULL_VERSION}-installer.jar"
+              UNIVERSAL_URL="https://maven.neoforged.net/releases/net/neoforged/neoforge/${FULL_VERSION}/neoforge-${FULL_VERSION}-universal.jar"
+              wget -P "$TEMP_DIR/" "$INSTALLER_URL" || echo "     - No installer found for $FULL_VERSION"
+              wget -P "$TEMP_DIR/" "$UNIVERSAL_URL" || echo "     - No universal found for $FULL_VERSION"
+            done
+            if [ -z "$(ls -A "$TEMP_DIR")" ]; then rm -rf "$TEMP_DIR"; continue; fi
+            ARCHIVE_NAME="neoforge-${GROUP}.tar.xz"
             tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
-            
-            echo "Uploading $ARCHIVE_NAME"
             gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
-            
-            echo "Cleaning up local files for $VERSION"
             rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
           done
 
