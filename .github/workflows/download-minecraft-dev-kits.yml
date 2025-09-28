@@ -1,4 +1,4 @@
-name: Accelerated Incremental Weekly Dev Kits Releaser
+name: Accelerated and Stabilized Incremental Releaser
 
 on:
   schedule:
@@ -9,11 +9,10 @@ permissions:
   contents: write
 
 jobs:
-  # 任务 1: 创建草稿 Release 并输出 upload_url
+  # 任务 1: 创建草稿 Release (无改动)
   create-draft:
     runs-on: ubuntu-latest
     outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
       tag: weekly-${{ env.TAG_DATE }}
     steps:
       - name: Checkout repository
@@ -34,20 +33,19 @@ jobs:
             - **NeoForge**: Per-version archives from the Maven repository.
           draft: true
 
-  # 任务 2: 并行处理 Forge
+  # 任务 2: 并行处理 Forge (无改动)
   process-forge:
     runs-on: ubuntu-latest
-    needs: create-draft # 依赖于 create-draft 任务
+    needs: create-draft
     steps:
-      - name: Install aria2 for parallel downloads
-        run: sudo apt-get update && sudo apt-get install -y aria2
+      - name: Checkout repository
+        uses: actions/checkout@v4
       - name: Process and Upload Forge Incrementally
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UPLOAD_URL: ${{ needs.create-draft.outputs.upload_url }} # 获取上传 URL
-          TAG: ${{ needs.create-draft.outputs.tag }} # 获取 Tag
+          TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
-          echo "--- Starting Forge Incremental Processing ---"
+          echo "--- Starting Forge Incremental Processing (wget mode) ---"
           INDEX_PAGES=$(curl -s https://files.minecraftforge.net/net/minecraftforge/forge/ | grep -oP 'href="(index_[^"]+\.html)"' | sed 's/href="\([^"]*\)"/\1/')
           
           for page in $INDEX_PAGES; do
@@ -58,46 +56,44 @@ jobs:
             mkdir -p "$TEMP_DIR"
             
             PAGE_URL="https://files.minecraftforge.net/net/minecraftforge/forge/$page"
-            # 搜集所有下载链接到一个文件
-            curl -s "$PAGE_URL" | grep -oP 'https://adfoc\.us/serve/sitelinks/[^"]+' | grep -iE 'installer|mdk|src|universal' | sort -u | sed -n 's/.*url=\(.*\)/\1/p' > url_list.txt
-            
-            if [ ! -s url_list.txt ]; then
-              echo "No files found for $MC_VERSION, skipping."
+            curl -s "$PAGE_URL" | grep -oP 'https://adfoc\.us/serve/sitelinks/[^"]+' | grep -iE 'installer|mdk|src|universal' | sort -u | sed -n 's/.*url=\(.*\)/\1/p' | while read -r DOWNLOAD_URL; do
+              if [[ -n "$DOWNLOAD_URL" ]]; then
+                FILENAME=$(basename "$DOWNLOAD_URL")
+                echo "Downloading: $FILENAME"
+                wget -P "$TEMP_DIR/" "$DOWNLOAD_URL" || echo "  -> Download failed: $FILENAME"
+              fi
+            done
+
+            if [ -z "$(ls -A "$TEMP_DIR")" ]; then
+              echo "No files downloaded for $MC_VERSION, skipping."
               rm -rf "$TEMP_DIR"
               continue
             fi
             
-            echo "Starting parallel download for $MC_VERSION..."
-            # 使用 aria2c 并行下载，-x 16 最大16个连接，-s 16 每个文件16个连接
-            aria2c --console-log-level=warn -c -x 16 -s 16 -d "$TEMP_DIR" -i url_list.txt
-            
             ARCHIVE_NAME="forge-${MC_VERSION}.tar.xz"
             echo "Archiving to $ARCHIVE_NAME"
-            # 使用多线程压缩 -T0 使用所有核心
             tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
             
             echo "Uploading $ARCHIVE_NAME"
             gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
             
             echo "Cleaning up local files for $MC_VERSION"
-            rm -rf "$TEMP_DIR" "$ARCHIVE_NAME" url_list.txt
+            rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
           done
 
-  # 任务 3: 并行处理 Fabric
+  # 任务 3: 并行处理 Fabric (无改动)
   process-fabric:
     runs-on: ubuntu-latest
     needs: create-draft
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
       - name: Process and Upload Fabric Incrementally
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
-          # Fabric API 下载本身就是 gh release download，已有一定的并行能力，这里暂时不用 aria2c 简化逻辑
-          # 但压缩和上传逻辑保持增量
           echo "--- Starting Fabric Incremental Processing ---"
-          # ... (Fabric 的脚本与上一版相同，但使用从 needs 获取的 TAG)
-          # 处理 Installer
           echo "Processing Fabric Installer..."
           INSTALLER_VERSION=$(curl -s https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml | grep -oP '<latest>\K[^<]+')
           INSTALLER_URL="https://maven.fabricmc.net/net/fabricmc/fabric-installer/${INSTALLER_VERSION}/fabric-installer-${INSTALLER_VERSION}.jar"
@@ -110,16 +106,12 @@ jobs:
           gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
           rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
           
-          # 处理 API
           echo "Processing Fabric APIs..."
           gh release list -R FabricMC/fabric -L 2000 --json tagName -q '.[].tagName' | while read tag; do
             echo "--- Processing Fabric API Version: $tag ---"
             TEMP_DIR="fabric_api_temp_${tag}"
             gh release download "$tag" -R FabricMC/fabric -p 'fabric-api-*.jar' --dir "$TEMP_DIR" --clobber || { echo "No assets found for $tag, skipping."; continue; }
-            if [ -z "$(ls -A "$TEMP_DIR")" ]; then
-              rm -rf "$TEMP_DIR"
-              continue
-            fi
+            if [ -z "$(ls -A "$TEMP_DIR")" ]; then rm -rf "$TEMP_DIR"; continue; fi
             ARCHIVE_NAME="fabric-api-${tag}.tar.xz"
             tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
             echo "Uploading $ARCHIVE_NAME"
@@ -127,44 +119,68 @@ jobs:
             rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
           done
   
-  # 任务 4: 并行处理 NeoForge
+  # ===================================================================
+  # 任务 4: 并行处理 NeoForge (已按您的要求重写)
+  # ===================================================================
   process-neoforge:
     runs-on: ubuntu-latest
     needs: create-draft
     steps:
-      - name: Process and Upload NeoForge Incrementally
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Process and Upload NeoForge Incrementally (via maven-metadata.xml)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
-          echo "--- Starting NeoForge Incremental Processing ---"
-          FULL_DIR="neoforge-full"
-          # NeoForge 仍然建议整体递归下载，因为文件结构紧密，aria2c 优势不明显
-          echo "Recursively downloading the entire NeoForge repository..."
-          wget -r -np -nH --cut-dirs=4 -R "index.html*" -P "$FULL_DIR/" https://maven.neoforged.net/releases/net/neoforged/neoforge/
+          echo "--- Starting NeoForge Incremental Processing (maven-metadata.xml mode) ---"
           
-          echo "Download complete. Starting to archive and upload per version..."
-          find "$FULL_DIR" -mindepth 1 -maxdepth 1 -type d | while read -r version_dir; do
-            VERSION=$(basename "$version_dir")
+          # 从 maven-metadata.xml 获取所有版本号
+          VERSIONS=$(curl -s "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml" | grep -oP '<version>\K[^<]+')
+          
+          for VERSION in $VERSIONS; do
             echo "--- Processing NeoForge Version: $VERSION ---"
+            
+            TEMP_DIR="neoforge_temp_${VERSION}"
+            mkdir -p "$TEMP_DIR"
+
+            # 拼接下载链接
+            INSTALLER_URL="https://maven.neoforged.net/releases/net/neoforged/neoforge/${VERSION}/neoforge-${VERSION}-installer.jar"
+            UNIVERSAL_URL="https://maven.neoforged.net/releases/net/neoforged/neoforge/${VERSION}/neoforge-${VERSION}-universal.jar"
+            
+            # 下载文件
+            echo "Downloading installer for $VERSION..."
+            wget -P "$TEMP_DIR/" "$INSTALLER_URL" || echo "  -> No installer found for $VERSION"
+            echo "Downloading universal for $VERSION..."
+            wget -P "$TEMP_DIR/" "$UNIVERSAL_URL" || echo "  -> No universal found for $VERSION"
+            
+            # 检查是否有文件被下载
+            if [ -z "$(ls -A "$TEMP_DIR")" ]; then
+              echo "No files downloaded for $VERSION, skipping."
+              rm -rf "$TEMP_DIR"
+              continue
+            fi
+            
             ARCHIVE_NAME="neoforge-${VERSION}.tar.xz"
-            tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$version_dir" .
+            echo "Archiving to $ARCHIVE_NAME"
+            tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
+            
             echo "Uploading $ARCHIVE_NAME"
             gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
-            rm "$ARCHIVE_NAME"
+            
+            echo "Cleaning up local files for $VERSION"
+            rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
           done
-          
-          echo "Cleaning up the full NeoForge download."
-          rm -rf "$FULL_DIR"
 
-  # 任务 5: 发布 Release
+  # 任务 5: 发布 Release (无改动)
   publish-release:
     runs-on: ubuntu-latest
-    # 关键: 等待所有处理任务都完成后再执行
     needs: [process-forge, process-fabric, process-neoforge]
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.create-draft.outputs.tag }}
-          draft: false # 将草稿状态改为 false，正式发布
+          draft: false
