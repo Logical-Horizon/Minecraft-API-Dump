@@ -15,7 +15,7 @@ permissions:
 
 # 定义一系列任务
 jobs:
-  # --- 下载 Forge 文件的任务 ---
+  # --- 下载任务 (与之前相同) ---
   download-forge:
     runs-on: ubuntu-latest
     steps:
@@ -42,7 +42,6 @@ jobs:
           name: forge-files
           path: forge-files/
 
-  # --- 下载 Fabric 文件的任务 ---
   download-fabric:
     runs-on: ubuntu-latest
     steps:
@@ -67,7 +66,6 @@ jobs:
           name: fabric-files
           path: fabric-files/
 
-  # --- 下载 NeoForge 文件的任务 ---
   download-neoforge:
     runs-on: ubuntu-latest
     steps:
@@ -90,44 +88,41 @@ jobs:
           name: neoforge-files
           path: neoforge-files/
 
-  # --- 创建 Release 的任务 ---
+  # --- 创建 Release 的任务 (已修正和优化) ---
   create-release:
-    # 使用最新的 Ubuntu 虚拟机环境
     runs-on: ubuntu-latest
-    # **关键**: 定义此任务依赖于前面三个下载任务
     needs: [download-forge, download-fabric, download-neoforge]
     steps:
-      # 第一步：下载所有由上游任务生成的 Artifacts
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          # 指定一个目录来存放所有下载的 artifacts
           path: artifacts/
 
-      # 第二步：将下载的 Artifacts 打包成独立的 zip 文件
       - name: Zip artifacts
         run: |
-          # 进入 artifacts 目录，每个 artifact 会被解压到一个以它名字命名的子目录中
           cd artifacts
           zip -r ../forge-files.zip forge-files
           zip -r ../fabric-files.zip fabric-files
           zip -r ../neoforge-files.zip neoforge-files
       
-      # 第三步：使用 softprops/action-gh-release Action 创建 Release
+      # 新增步骤：获取当前日期作为环境变量
+      - name: Get current date
+        id: date
+        run: echo "TAG_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+
+      # 已修正和优化的创建 Release 步骤
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          # Release 的标题
-          name: Dev Kits - ${{ github.run_id }}
-          # 自动生成一个基于日期的 tag，例如 weekly-2025-09-28
-          tag_name: weekly-${{- github.run_id }}
-          # Release 的描述内容，支持 Markdown
+          # 使用日期作为 Release 标题，更清晰
+          name: Dev Kits - ${{ env.TAG_DATE }}
+          # 修正了语法错误，并使用日期作为 tag
+          tag_name: weekly-${{ env.TAG_DATE }}
           body: |
             Automated weekly collection of Minecraft modding development kits.
             - **Forge**: Installers and MDKs.
             - **Fabric**: Installer and all API versions.
             - **NeoForge**: Installers and Universal JARs.
-          # 指定要上传的文件，这里使用通配符匹配所有 zip 文件
           files: |
             forge-files.zip
             fabric-files.zip
