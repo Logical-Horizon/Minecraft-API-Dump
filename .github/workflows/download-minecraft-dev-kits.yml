@@ -1,142 +1,145 @@
-# 工作流名称
-name: Weekly Minecraft Dev Kits Downloader and Releaser
+name: Incremental Weekly Dev Kits Releaser
 
-# 工作流触发器
 on:
   schedule:
     - cron: '0 0 * * 0'
   workflow_dispatch:
 
-# 为工作流授予创建 Release 的权限
 permissions:
   contents: write
 
 jobs:
-  # --- 下载任务部分保持不变 ---
-  download-forge:
+  build-and-release:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Download all Forge files by traversing index pages
-        run: |
-          mkdir -p forge-files
-          echo "正在探测 Forge 主页以获取所有 MC 版本索引页..."
-          INDEX_PAGES=$(curl -s https://files.minecraftforge.net/net/minecraftforge/forge/ | \
-                        grep -oP 'href="(index_[^"]+\.html)"' | \
-                        sed 's/href="\([^"]*\)"/\1/')
-          for page in $INDEX_PAGES; do
-            MC_VERSION=$(echo "$page" | sed -e 's/index_//' -e 's/\.html//')
-            echo "--- 正在处理 Minecraft 版本: $MC_VERSION ---"
-            PAGE_URL="https://files.minecraftforge.net/net/minecraftforge/forge/$page"
-            ADFOC_URLS=$(curl -s "$PAGE_URL" | \
-                         grep -oP 'https://adfoc\.us/serve/sitelinks/[^"]+' | \
-                         grep -iE 'installer|mdk|src|universal' | sort -u)
-            for adfoc_url in $ADFOC_URLS; do
-              DOWNLOAD_URL=$(echo "$adfoc_url" | sed -n 's/.*url=\(.*\)/\1/p')
-              if [[ -n "$DOWNLOAD_URL" ]]; then
-                FILENAME=$(basename "$DOWNLOAD_URL")
-                echo "准备下载 (Forge): $FILENAME"
-                wget -P forge-files/ "$DOWNLOAD_URL" || echo "  -> 下载失败: $FILENAME"
-              fi
-            done
-          done
-          echo "Forge 文件下载完成。"
-      - name: Upload Forge artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: forge-files
-          path: forge-files/
-
-  download-fabric:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Download Fabric Installer and API
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p fabric-files/installer fabric-files/api
-          echo "正在下载 Fabric Universal Installer..."
-          LATEST_INSTALLER_VERSION=$(curl -s https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml | grep -oP '<latest>\K[^<]+')
-          INSTALLER_URL="https://maven.fabricmc.net/net/fabricmc/fabric-installer/${LATEST_INSTALLER_VERSION}/fabric-installer-${LATEST_INSTALLER_VERSION}.jar"
-          INSTALLER_FILENAME=$(basename "$INSTALLER_URL")
-          echo "准备下载 (Fabric): $INSTALLER_FILENAME"
-          wget -P fabric-files/installer/ "$INSTALLER_URL"
-          echo "--- 开始获取并下载所有 Fabric API 版本 ---"
-          gh release list -R FabricMC/fabric -L 2000 --json tagName -q '.[].tagName' | while read tag; do
-            echo "正在处理 Fabric API 版本: $tag"
-            gh release download "$tag" -R FabricMC/fabric -p 'fabric-api-*.jar' --dir "fabric-files/api/${tag}" --clobber || echo "  -> 未找到或无法下载 API: $tag"
-          done
-          echo "Fabric 文件下载完成。"
-      - name: Upload Fabric artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: fabric-files
-          path: fabric-files/
-
-  download-neoforge:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Download all NeoForge files recursively
-        run: |
-          mkdir -p neoforge-files
-          echo "正在开始递归下载整个 NeoForge Maven 仓库..."
-          echo "目标: https://maven.neoforged.net/releases/net/neoforged/neoforge/"
-          wget -r -np -nH --cut-dirs=4 -R "index.html*" \
-               -P neoforge-files/ \
-               https://maven.neoforged.net/releases/net/neoforged/neoforge/
-          echo "NeoForge 仓库下载完成。"
-      - name: Upload NeoForge artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: neoforge-files
-          path: neoforge-files/
-
-  # --- 创建 Release 的任务 (已更新标题) ---
-  create-release:
-    runs-on: ubuntu-latest
-    needs: [download-forge, download-fabric, download-neoforge]
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts/
-
-      - name: Archive and compress artifacts using XZ
-        run: |
-          cd artifacts
-          echo "正在使用 tar.xz 压缩 forge-files..."
-          tar -cJvf ../forge-files.tar.xz forge-files
-          
-          echo "正在使用 tar.xz 压缩 fabric-files..."
-          tar -cJvf ../fabric-files.tar.xz fabric-files
-
-          echo "正在使用 tar.xz 压缩 neoforge-files..."
-          tar -cJvf ../neoforge-files.tar.xz neoforge-files
-
+      # 步骤 1: 获取日期并创建 Release 草稿
       - name: Get current date
         id: date
         run: echo "TAG_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
 
-      # 关键改动: 更新 Release 标题
-      - name: Create Release
+      - name: Create Draft Release
+        id: create_release
         uses: softprops/action-gh-release@v2
         with:
-          # 将标题直接设置为日期
           name: ${{ env.TAG_DATE }}
           tag_name: weekly-${{ env.TAG_DATE }}
           body: |
-            Automated weekly collection of Minecraft modding development kits.
-            - **Forge**: Installers, MDKs, Sources, and Universal JARs (All versions scraped from index pages).
-            - **Fabric**: Latest Installer and all API versions from GitHub Releases.
-            - **NeoForge**: Complete recursive download of the official Maven repository.
+            Automated weekly collection of Minecraft modding development kits. This release is built incrementally.
+            - **Forge**: Per-MC-version archives.
+            - **Fabric**: Installer and Per-API-version archives.
+            - **NeoForge**: Per-version archives from the Maven repository.
+          draft: true # 关键: 创建为草稿
+          prerelease: false
+
+      # 步骤 2: 增量处理 Forge
+      - name: Process and Upload Forge Incrementally
+        run: |
+          echo "--- Starting Forge Incremental Processing ---"
+          INDEX_PAGES=$(curl -s https://files.minecraftforge.net/net/minecraftforge/forge/ | grep -oP 'href="(index_[^"]+\.html)"' | sed 's/href="\([^"]*\)"/\1/')
           
-          #Compressed using XZ for better compression ratio.
-          files: |
-            forge-files.tar.xz
-            fabric-files.tar.xz
-            neoforge-files.tar.xz
+          for page in $INDEX_PAGES; do
+            MC_VERSION=$(echo "$page" | sed -e 's/index_//' -e 's/\.html//')
+            echo "--- Processing Forge for MC Version: $MC_VERSION ---"
+            
+            TEMP_DIR="forge_temp_${MC_VERSION}"
+            mkdir -p "$TEMP_DIR"
+            
+            PAGE_URL="https://files.minecraftforge.net/net/minecraftforge/forge/$page"
+            ADFOC_URLS=$(curl -s "$PAGE_URL" | grep -oP 'https://adfoc\.us/serve/sitelinks/[^"]+' | grep -iE 'installer|mdk|src|universal' | sort -u)
+            
+            for adfoc_url in $ADFOC_URLS; do
+              DOWNLOAD_URL=$(echo "$adfoc_url" | sed -n 's/.*url=\(.*\)/\1/p')
+              if [[ -n "$DOWNLOAD_URL" ]]; then
+                FILENAME=$(basename "$DOWNLOAD_URL")
+                echo "Downloading: $FILENAME"
+                wget -P "$TEMP_DIR/" "$DOWNLOAD_URL" || echo "  -> Download failed: $FILENAME"
+              fi
+            done
+            
+            if [ -z "$(ls -A "$TEMP_DIR")" ]; then
+              echo "No files downloaded for $MC_VERSION, skipping."
+              rm -rf "$TEMP_DIR"
+              continue
+            fi
+            
+            ARCHIVE_NAME="forge-${MC_VERSION}.tar.xz"
+            echo "Archiving to $ARCHIVE_NAME"
+            tar -cJvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
+            
+            echo "Uploading $ARCHIVE_NAME"
+            gh release upload weekly-${{ env.TAG_DATE }} "$ARCHIVE_NAME" --clobber
+            
+            echo "Cleaning up local files for $MC_VERSION"
+            rm -rf "$TEMP_DIR"
+            rm "$ARCHIVE_NAME"
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 步骤 3: 增量处理 Fabric
+      - name: Process and Upload Fabric Incrementally
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "--- Starting Fabric Incremental Processing ---"
+          # 处理 Installer
+          echo "Processing Fabric Installer..."
+          INSTALLER_VERSION=$(curl -s https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml | grep -oP '<latest>\K[^<]+')
+          INSTALLER_URL="https://maven.fabricmc.net/net/fabricmc/fabric-installer/${INSTALLER_VERSION}/fabric-installer-${INSTALLER_VERSION}.jar"
+          TEMP_DIR="fabric_installer_temp"
+          mkdir -p "$TEMP_DIR"
+          wget -P "$TEMP_DIR/" "$INSTALLER_URL"
+          ARCHIVE_NAME="fabric-installer.tar.xz"
+          tar -cJvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
+          echo "Uploading $ARCHIVE_NAME"
+          gh release upload weekly-${{ env.TAG_DATE }} "$ARCHIVE_NAME" --clobber
+          rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
+
+          # 处理 API
+          echo "Processing Fabric APIs..."
+          gh release list -R FabricMC/fabric -L 2000 --json tagName -q '.[].tagName' | while read tag; do
+            echo "--- Processing Fabric API Version: $tag ---"
+            TEMP_DIR="fabric_api_temp_${tag}"
+            gh release download "$tag" -R FabricMC/fabric -p 'fabric-api-*.jar' --dir "$TEMP_DIR" --clobber || { echo "No assets found for $tag, skipping."; continue; }
+            if [ -z "$(ls -A "$TEMP_DIR")" ]; then
+              echo "No files downloaded for $tag, skipping."
+              rm -rf "$TEMP_DIR"
+              continue
+            fi
+            ARCHIVE_NAME="fabric-api-${tag}.tar.xz"
+            tar -cJvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
+            echo "Uploading $ARCHIVE_NAME"
+            gh release upload weekly-${{ env.TAG_DATE }} "$ARCHIVE_NAME" --clobber
+            rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
+          done
+
+      # 步骤 4: 增量处理 NeoForge
+      - name: Process and Upload NeoForge Incrementally
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "--- Starting NeoForge Incremental Processing ---"
+          FULL_DIR="neoforge-full"
+          echo "Recursively downloading the entire NeoForge repository (this may take a while)..."
+          wget -r -np -nH --cut-dirs=4 -R "index.html*" -P "$FULL_DIR/" https://maven.neoforged.net/releases/net/neoforged/neoforge/
+          
+          echo "Download complete. Starting to archive and upload per version..."
+          for version_dir in "$FULL_DIR"/*/; do
+            VERSION=$(basename "$version_dir")
+            echo "--- Processing NeoForge Version: $VERSION ---"
+            ARCHIVE_NAME="neoforge-${VERSION}.tar.xz"
+            tar -cJvf "$ARCHIVE_NAME" -C "$version_dir" .
+            echo "Uploading $ARCHIVE_NAME"
+            gh release upload weekly-${{ env.TAG_DATE }} "$ARCHIVE_NAME" --clobber
+            rm "$ARCHIVE_NAME"
+          done
+          
+          echo "Cleaning up the full NeoForge download."
+          rm -rf "$FULL_DIR"
+
+      # 步骤 5: 正式发布 Release
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: weekly-${{ env.TAG_DATE }}
+          draft: false # 关键: 更新为非草稿，使其可见
