@@ -1,4 +1,4 @@
-name: 自动化的对 Minecraft 的主要 API 进行 Dump
+name: 自动化的对 Minecraft 的主要 API 进行 Dump (NeoForge Optimized)
 
 on:
   schedule:
@@ -40,8 +40,9 @@ jobs:
             - **Fabric**: Installer and Per-MC-Version-group API archives (from Maven).
             - **NeoForge**: Per-Major.Minor-version-group archives from the Maven repository.
           draft: true
+          token: ${{ secrets.ACTION_PAT }}
 
-  # 任务 2: 并行处理 Forge
+  # 任务 2: 并行处理 Forge (使用 wget)
   process-forge:
     runs-on: ubuntu-latest
     needs: create-draft
@@ -77,7 +78,7 @@ jobs:
             rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
           done
 
-  # 任务 3: 并行处理 Fabric
+  # 任务 3: 并行处理 Fabric (使用 wget)
   process-fabric:
     runs-on: ubuntu-latest
     needs: create-draft
@@ -96,11 +97,12 @@ jobs:
           TEMP_DIR_INSTALLER="fabric_installer_temp"
           mkdir -p "$TEMP_DIR_INSTALLER"
           wget -nv -P "$TEMP_DIR_INSTALLER/" "$INSTALLER_URL"
-          ARCHIVE_NAME_INSTALLER="fabric-installer.tar.xz"
-          tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME_INSTALLER" -C "$TEMP_DIR_INSTALLER" .
-          echo "Uploading $ARCHIVE_NAME_INSTALLER"
-          gh release upload "$TAG" "$ARCHIVE_NAME_INSTALLER" --clobber
-          rm -rf "$TEMP_DIR_INSTALLER" "$ARCHIVE_NAME_INSTALLER"
+          if [ -z "$(ls -A "$TEMP_DIR_INSTALLER")" ]; then echo "Fabric Installer download failed, skipping."; else
+             ARCHIVE_NAME_INSTALLER="fabric-installer.tar.xz"
+             tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME_INSTALLER" -C "$TEMP_DIR_INSTALLER" .
+             gh release upload "$TAG" "$ARCHIVE_NAME_INSTALLER" --clobber
+             rm -rf "$TEMP_DIR_INSTALLER" "$ARCHIVE_NAME_INSTALLER"
+          fi
           
           echo "--- Group Processing for Fabric APIs from Maven ---"
           API_MAVEN_URL="https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/"
@@ -111,50 +113,74 @@ jobs:
             TEMP_DIR_API="fabric_api_temp_${GROUP//./_}"
             mkdir -p "$TEMP_DIR_API"
             for FULL_VERSION in $(echo "$ALL_VERSIONS" | grep "+${GROUP}"); do
-              echo "  -> Found version: $FULL_VERSION"
               API_URL="${API_MAVEN_URL}${FULL_VERSION}/fabric-api-${FULL_VERSION}.jar"
               wget -nv -P "$TEMP_DIR_API/" "$API_URL" || echo "     - FAILED: API for $FULL_VERSION"
             done
             if [ -z "$(ls -A "$TEMP_DIR_API")" ]; then rm -rf "$TEMP_DIR_API"; continue; fi
             ARCHIVE_NAME_API="fabric-api-${GROUP}.tar.xz"
-            echo "Archiving to $ARCHIVE_NAME_API"
             tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME_API" -C "$TEMP_DIR_API" .
-            echo "Uploading $ARCHIVE_NAME_API"
             gh release upload "$TAG" "$ARCHIVE_NAME_API" --clobber
             rm -rf "$TEMP_DIR_API" "$ARCHIVE_NAME_API"
           done
 
-  # 任务 4: 并行处理 NeoForge
+  # ===================================================================
+  # 任务 4: 并行处理 NeoForge (使用 aria2c 并行下载)
+  # ===================================================================
   process-neoforge:
     runs-on: ubuntu-latest
     needs: create-draft
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Process and Upload NeoForge by Version Group
+      # 新增: 仅为此任务安装 aria2
+      - name: Install parallel downloader
+        run: sudo apt-get update && sudo apt-get install -y aria2
+      - name: Process and Upload NeoForge by Version Group (Parallel Download)
         env:
           GH_TOKEN: ${{ secrets.ACTION_PAT }}
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
-          echo "--- Starting NeoForge Group Processing ---"
+          echo "--- Starting NeoForge Group Processing (Parallel Download) ---"
           ALL_VERSIONS=$(curl -s "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml" | grep -oP '<version>\K[^<]+')
           VERSION_GROUPS=$(echo "$ALL_VERSIONS" | cut -d'.' -f1,2 | sort -u)
+          
           for GROUP in $VERSION_GROUPS; do
             echo "--- Processing NeoForge Group: $GROUP ---"
             TEMP_DIR="neoforge_temp_${GROUP}"
+            URL_LIST="urls_neoforge.txt"
             mkdir -p "$TEMP_DIR"
+            # 清空或创建 URL 列表文件
+            > "$URL_LIST"
+
+            # 收集该分组的所有下载链接
             for FULL_VERSION in $(echo "$ALL_VERSIONS" | grep "^${GROUP}"); do
-              echo "  -> Downloading files for version: $FULL_VERSION"
               INSTALLER_URL="https://maven.neoforged.net/releases/net/neoforged/neoforge/${FULL_VERSION}/neoforge-${FULL_VERSION}-installer.jar"
               UNIVERSAL_URL="https://maven.neoforged.net/releases/net/neoforged/neoforge/${FULL_VERSION}/neoforge-${FULL_VERSION}-universal.jar"
-              wget -nv -P "$TEMP_DIR/" "$INSTALLER_URL" || echo "     - FAILED: Installer for $FULL_VERSION"
-              wget -nv -P "$TEMP_DIR/" "$UNIVERSAL_URL" || echo "     - FAILED: Universal for $FULL_VERSION"
+              # 检查链接是否可能存在，避免 aria2c 因 404 报错
+              # 使用 curl -s -o /dev/null -w "%{http_code}" 检查状态码
+              if [ $(curl -s -o /dev/null -w "%{http_code}" "$INSTALLER_URL") -eq 200 ]; then
+                echo "$INSTALLER_URL" >> "$URL_LIST"
+              fi
+              if [ $(curl -s -o /dev/null -w "%{http_code}" "$UNIVERSAL_URL") -eq 200 ]; then
+                echo "$UNIVERSAL_URL" >> "$URL_LIST"
+              fi
             done
+            
+            if [ ! -s "$URL_LIST" ]; then
+              echo "No valid files found for group $GROUP, skipping."
+              rm -rf "$TEMP_DIR"
+              continue
+            fi
+            
+            echo "Starting parallel download for group $GROUP..."
+            # -x 8: 每个主机最多8个连接; -s 8: 每个文件最多8个分片
+            aria2c --console-log-level=warn -c -x 8 -s 8 -d "$TEMP_DIR" -i "$URL_LIST"
+            
             if [ -z "$(ls -A "$TEMP_DIR")" ]; then rm -rf "$TEMP_DIR"; continue; fi
             ARCHIVE_NAME="neoforge-${GROUP}.tar.xz"
             tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
             gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
-            rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
+            rm -rf "$TEMP_DIR" "$ARCHIVE_NAME" "$URL_LIST"
           done
 
   # 任务 5: 发布 Release
@@ -169,4 +195,4 @@ jobs:
         with:
           tag_name: ${{ needs.create-draft.outputs.tag }}
           draft: false
-          
+          token: ${{ secrets.ACTION_PAT }}
