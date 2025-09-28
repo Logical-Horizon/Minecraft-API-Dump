@@ -1,0 +1,134 @@
+# 工作流名称
+name: Weekly Minecraft Dev Kits Downloader and Releaser
+
+# 工作流触发器
+on:
+  # 每周日凌晨0点 (UTC时间) 自动运行
+  schedule:
+    - cron: '0 0 * * 0'
+  # 允许在 GitHub Actions 页面手动触发
+  workflow_dispatch:
+
+# 为整个工作流设置权限，使其能够创建 Release
+permissions:
+  contents: write
+
+# 定义一系列任务
+jobs:
+  # --- 下载 Forge 文件的任务 ---
+  download-forge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Download all Forge Installers and MDKs
+        run: |
+          mkdir -p forge-files
+          echo "正在获取 Forge 版本列表..."
+          curl -s http://files.minecraftforge.net/maven/net/minecraftforge/forge/json -o forge-versions.json
+          echo "开始解析并下载 Forge 文件..."
+          jq -r '.promos | to_entries[] | .value' forge-versions.json | while read -r version; do
+            mc_version=$(echo "$version" | cut -d'-' -f1)
+            forge_version=$(echo "$version" | cut -d'-' -f2)
+            installer_url="https://files.minecraftforge.net/maven/net/minecraftforge/forge/${mc_version}-${forge_version}/forge-${mc_version}-${forge_version}-installer.jar"
+            mdk_url="https://files.minecraftforge.net/maven/net/minecraftforge/forge/${mc_version}-${forge_version}/forge-${mc_version}-${forge_version}-mdk.zip"
+            wget -q -P forge-files/ "$installer_url" || echo "无法下载 Installer: $version"
+            wget -q -P forge-files/ "$mdk_url" || echo "无法下载 MDK: $version"
+          done
+          echo "Forge 文件下载完成。"
+      - name: Upload Forge artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-files
+          path: forge-files/
+
+  # --- 下载 Fabric 文件的任务 ---
+  download-fabric:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Download Fabric Installer and API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p fabric-files/installer fabric-files/api
+          echo "正在下载 Fabric Universal Installer..."
+          LATEST_INSTALLER_VERSION=$(curl -s https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml | grep -oP '<latest>\K[^<]+')
+          wget -q -P fabric-files/installer/ "https://maven.fabricmc.net/net/fabricmc/fabric-installer/${LATEST_INSTALLER_VERSION}/fabric-installer-${LATEST_INSTALLER_VERSION}.jar"
+          echo "正在获取并下载所有 Fabric API 版本..."
+          gh release list -R FabricMC/fabric -L 1000 --json tagName -q '.[].tagName' | while read tag; do
+            gh release download "$tag" -R FabricMC/fabric -p 'fabric-api-*.jar' --dir "fabric-files/api/${tag}" --clobber || echo "无法下载 API: $tag"
+          done
+          echo "Fabric 文件下载完成。"
+      - name: Upload Fabric artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabric-files
+          path: fabric-files/
+
+  # --- 下载 NeoForge 文件的任务 ---
+  download-neoforge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Download all NeoForge Installers and Universal files
+        run: |
+          mkdir -p neoforge-files
+          echo "正在获取 NeoForge 版本列表..."
+          curl -s "https://maven.neoforged.net/net/neoforged/neoforge/maven-metadata.xml" | grep -oP '<version>\K[^<]+' | while read -r version; do
+            installer_url="https://maven.neoforged.net/net/neoforged/neoforge/${version}/neoforge-${version}-installer.jar"
+            universal_url="https://maven.neoforged.net/net/neoforged/neoforge/${version}/neoforge-${version}-universal.jar"
+            wget -q -P "neoforge-files/${version}/" "$installer_url" || echo "无法下载 NeoForge Installer: $version"
+            wget -q -P "neoforge-files/${version}/" "$universal_url" || echo "无法下载 NeoForge Universal: $version"
+          done
+          echo "NeoForge 文件下载完成。"
+      - name: Upload NeoForge artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: neoforge-files
+          path: neoforge-files/
+
+  # --- 创建 Release 的任务 ---
+  create-release:
+    # 使用最新的 Ubuntu 虚拟机环境
+    runs-on: ubuntu-latest
+    # **关键**: 定义此任务依赖于前面三个下载任务
+    needs: [download-forge, download-fabric, download-neoforge]
+    steps:
+      # 第一步：下载所有由上游任务生成的 Artifacts
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # 指定一个目录来存放所有下载的 artifacts
+          path: artifacts/
+
+      # 第二步：将下载的 Artifacts 打包成独立的 zip 文件
+      - name: Zip artifacts
+        run: |
+          # 进入 artifacts 目录，每个 artifact 会被解压到一个以它名字命名的子目录中
+          cd artifacts
+          zip -r ../forge-files.zip forge-files
+          zip -r ../fabric-files.zip fabric-files
+          zip -r ../neoforge-files.zip neoforge-files
+      
+      # 第三步：使用 softprops/action-gh-release Action 创建 Release
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Release 的标题
+          name: Dev Kits - ${{ github.run_id }}
+          # 自动生成一个基于日期的 tag，例如 weekly-2025-09-28
+          tag_name: weekly-${{- github.run_id }}
+          # Release 的描述内容，支持 Markdown
+          body: |
+            Automated weekly collection of Minecraft modding development kits.
+            - **Forge**: Installers and MDKs.
+            - **Fabric**: Installer and all API versions.
+            - **NeoForge**: Installers and Universal JARs.
+          # 指定要上传的文件，这里使用通配符匹配所有 zip 文件
+          files: |
+            forge-files.zip
+            fabric-files.zip
+            neoforge-files.zip
