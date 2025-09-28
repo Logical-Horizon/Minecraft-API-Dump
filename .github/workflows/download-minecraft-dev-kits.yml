@@ -22,7 +22,7 @@ jobs:
         run: echo "TAG_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
       - name: Clean up previous failed run
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ACTION_PAT }}
         run: |
           TAG="weekly-${{ env.TAG_DATE }}"
           echo "Checking for and deleting existing release with tag $TAG"
@@ -50,7 +50,7 @@ jobs:
         uses: actions/checkout@v4
       - name: Process and Upload Forge Incrementally
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ACTION_PAT }}
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
           echo "--- Starting Forge Incremental Processing (wget mode) ---"
@@ -86,7 +86,7 @@ jobs:
         uses: actions/checkout@v4
       - name: Process and Upload Fabric Incrementally (Maven Mode)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ACTION_PAT }}
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
           echo "--- Starting Fabric Incremental Processing (Maven Mode) ---"
@@ -133,7 +133,7 @@ jobs:
         uses: actions/checkout@v4
       - name: Process and Upload NeoForge by Version Group
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ACTION_PAT }}
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
           echo "--- Starting NeoForge Group Processing ---"
