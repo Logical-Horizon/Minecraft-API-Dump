@@ -36,13 +36,15 @@ jobs:
           tag_name: weekly-${{ env.TAG_DATE }}
           body: |
             Minecraft 主要 Mod 开发工具包的每周自动归档。此版本是增量式并行构建的。
-            - **Forge**: 按 Minecraft 版本归档 (MDK, Installer, Universal)。超大文件会被分割为约 2000MB 的分卷。
+            - **Forge**: 按 Minecraft 版本归档 (MDK, Installer, Universal)。超大文件会被分割为约 2000MB 的分卷 (xxx.part01.txz)。
             - **Fabric**: Installer 以及按 Minecraft 版本分组的 API (来自 Maven)。
             - **NeoForge**: 按大版本.小版本分组的归档 (来自 Maven)。
           draft: true
           token: ${{ secrets.ACTION_PAT }}
 
-  # 任务 2: 并行处理 Forge
+  # ===================================================================
+  # 任务 2: 并行处理 Forge (回归“先打包后分割”方案)
+  # ===================================================================
   process-forge:
     runs-on: ubuntu-latest
     needs: create-draft
@@ -56,6 +58,8 @@ jobs:
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
           echo "--- 开始增量处理 Forge ---"
+          # 2 GiB in bytes
+          SIZE_LIMIT=2147483648
           INDEX_PAGES=$(curl -s https://files.minecraftforge.net/net/minecraftforge/forge/ | grep -oP 'href="(index_[^"]+\.html)"' | sed 's/href="\([^"]*\)"/\1/')
           for page in $INDEX_PAGES; do
             MC_VERSION=$(echo "$page" | sed -e 's/index_//' -e 's/\.html//')
@@ -72,27 +76,33 @@ jobs:
             done
             if [ -z "$(ls -A "$TEMP_DIR")" ]; then echo "版本 $MC_VERSION 未下载到任何文件，跳过。"; rm -rf "$TEMP_DIR"; continue; fi
             
-            ARCHIVE_PREFIX="forge-${MC_VERSION}"
-            echo "正在进行流式归档、压缩和分卷..."
-            # 关键改动: 分卷大小改为 2000M
-            tar -C "$TEMP_DIR" -c . | xz -T0 -z - | split -b 2000M - "${ARCHIVE_PREFIX}.tar.xz.part_"
-
-            echo "正在上传分卷..."
-            parts_exist=$(ls ${ARCHIVE_PREFIX}.tar.xz.part_* 2>/dev/null)
-            if [ -n "$parts_exist" ]; then
-              for part in ${ARCHIVE_PREFIX}.tar.xz.part_*; do
-                echo "  -> 正在上传 $part"
-                gh release upload "$TAG" "$part" --clobber
+            ARCHIVE_NAME="forge-${MC_VERSION}.tar.xz"
+            echo "正在归档至 $ARCHIVE_NAME"
+            tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
+            
+            ARCHIVE_SIZE=$(stat -c%s "$ARCHIVE_NAME")
+            if [ "$ARCHIVE_SIZE" -gt "$SIZE_LIMIT" ]; then
+              echo "归档文件大小 ($ARCHIVE_SIZE 字节) 已超过 2.0 GiB 上限。正在进行分片..."
+              # 关键改动: 使用数字后缀，并重命名为 .partXX.txz 格式
+              split -b 2000M --numeric-suffixes=1 --suffix-length=2 "$ARCHIVE_NAME" "${ARCHIVE_NAME}.part"
+              
+              echo "正在上传分片文件..."
+              for part in ${ARCHIVE_NAME}.part*; do
+                # 重命名分片文件以符合 xxx.part01.txz 格式
+                mv "$part" "${part}.txz"
+                echo "  -> 正在上传 ${part}.txz"
+                gh release upload "$TAG" "${part}.txz" --clobber
               done
             else
-              echo "  -> 未创建任何分卷，可能归档为空。"
+              echo "归档文件大小在限制范围内。直接上传..."
+              gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
             fi
 
             echo "正在清理版本 $MC_VERSION 的本地文件..."
-            rm -rf "$TEMP_DIR" "${ARCHIVE_PREFIX}.tar.xz.part_"*
+            rm -rf "$TEMP_DIR" "${ARCHIVE_NAME}"*
           done
 
-  # 任务 3: 并行处理 Fabric
+  # 任务 3: 并行处理 Fabric (无改动)
   process-fabric:
     runs-on: ubuntu-latest
     needs: create-draft
@@ -140,7 +150,7 @@ jobs:
             rm -rf "$TEMP_DIR_API" "$ARCHIVE_NAME_API"
           done
 
-  # 任务 4: 并行处理 NeoForge
+  # 任务 4: 并行处理 NeoForge (无改动)
   process-neoforge:
     runs-on: ubuntu-latest
     needs: create-draft
@@ -174,7 +184,7 @@ jobs:
             rm -rf "$TEMP_DIR" "$ARCHIVE_NAME"
           done
 
-  # 任务 5: 最终发布
+  # 任务 5: 最终发布 (无改动)
   publish-release:
     runs-on: ubuntu-latest
     if: always()
