@@ -1,4 +1,4 @@
-name: 自动化的对 Minecraft 的主要 API 进行 Dump (NeoForge Performance Fix)
+name: 自动化的对 Minecraft 的主要 API 进行 Dump
 
 on:
   schedule:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  # 任务 1: 创建草稿 Release (无改动)
+  # 任务 1: 创建草稿 Release
   create-draft:
     runs-on: ubuntu-latest
     outputs:
@@ -42,7 +42,9 @@ jobs:
           draft: true
           token: ${{ secrets.ACTION_PAT }}
 
-  # 任务 2: 并行处理 Forge (无改动)
+  # ===================================================================
+  # 任务 2: 并行处理 Forge (已重构为并行下载)
+  # ===================================================================
   process-forge:
     runs-on: ubuntu-latest
     needs: create-draft
@@ -50,28 +52,33 @@ jobs:
     steps:
       - name: 检出仓库代码
         uses: actions/checkout@v4
-      - name: 增量处理并上传 Forge 文件
+      - name: 安装并行下载工具
+        run: sudo apt-get update && sudo apt-get install -y aria2
+      - name: 增量处理并上传 Forge 文件 (并行下载模式)
         env:
           GH_TOKEN: ${{ secrets.ACTION_PAT }}
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
-          echo "--- 开始增量处理 Forge ---"
+          echo "--- 开始增量处理 Forge (并行下载模式) ---"
           SIZE_LIMIT=2147483648
           INDEX_PAGES=$(curl -s https://files.minecraftforge.net/net/minecraftforge/forge/ | grep -oP 'href="(index_[^"]+\.html)"' | sed 's/href="\([^"]*\)"/\1/')
           for page in $INDEX_PAGES; do
             MC_VERSION=$(echo "$page" | sed -e 's/index_//' -e 's/\.html//')
             echo "--- 正在处理 Forge (MC 版本: $MC_VERSION) ---"
             TEMP_DIR="forge_temp_${MC_VERSION}"
+            URL_LIST="urls_forge.txt"
             mkdir -p "$TEMP_DIR"
+            
             PAGE_URL="https://files.minecraftforge.net/net/minecraftforge/forge/$page"
-            curl -s "$PAGE_URL" | grep -oP 'https://adfoc\.us/serve/sitelinks/[^"]+' | grep -iE 'installer|mdk|universal' | sort -u | sed -n 's/.*url=\(.*\)/\1/p' | while read -r DOWNLOAD_URL; do
-              if [[ -n "$DOWNLOAD_URL" ]]; then
-                FILENAME=$(basename "$DOWNLOAD_URL")
-                echo "正在下载: $FILENAME"
-                wget -nv -P "$TEMP_DIR/" "$DOWNLOAD_URL" || echo "  -> 下载失败: $FILENAME"
-              fi
-            done
-            if [ -z "$(ls -A "$TEMP_DIR")" ]; then echo "版本 $MC_VERSION 未下载到任何文件，跳过。"; rm -rf "$TEMP_DIR"; continue; fi
+            # 收集该版本的所有下载链接
+            curl -s "$PAGE_URL" | grep -oP 'https://adfoc\.us/serve/sitelinks/[^"]+' | grep -iE 'installer|mdk|universal' | sort -u | sed -n 's/.*url=\(.*\)/\1/p' > "$URL_LIST"
+
+            if [ ! -s "$URL_LIST" ]; then echo "版本 $MC_VERSION 未找到任何链接，跳过。"; rm -rf "$TEMP_DIR"; continue; fi
+            
+            echo "开始并行下载 $MC_VERSION 的所有文件..."
+            aria2c --console-log-level=warn -c -x 16 -s 16 --async-dns=false --show-console-readout=false -d "$TEMP_DIR" -i "$URL_LIST"
+            
+            if [ -z "$(ls -A "$TEMP_DIR")" ]; then echo "版本 $MC_VERSION 未下载到任何文件，跳过。"; rm -rf "$TEMP_DIR" "$URL_LIST"; continue; fi
             ARCHIVE_NAME="forge-${MC_VERSION}.tar.xz"
             echo "正在归档至 $ARCHIVE_NAME"
             tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
@@ -90,7 +97,7 @@ jobs:
               gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
             fi
             echo "正在清理版本 $MC_VERSION 的本地文件..."
-            rm -rf "$TEMP_DIR" "${ARCHIVE_NAME}"*
+            rm -rf "$TEMP_DIR" "${ARCHIVE_NAME}"* "$URL_LIST"
           done
 
   # 任务 3: 并行处理 Fabric (无改动)
@@ -179,7 +186,7 @@ jobs:
           done
 
   # ===================================================================
-  # 任务 5: 最终发布 (已修正语法错误)
+  # 任务 5: 最终发布 (已移除隐藏源代码的步骤)
   # ===================================================================
   publish-release:
     runs-on: ubuntu-latest
@@ -226,16 +233,3 @@ jobs:
             ${{ steps.check_failure.outputs.error_package_created == 'true' && '警告: 一个或多个任务失败。这是一个不完整的 Release。请检查 error.tgz 文件获取详细日志。' || '' }}
           draft: false
           token: ${{ secrets.ACTION_PAT }}
-      - name: 隐藏 Release 中的源代码包
-        if: steps.publish.outputs.id != ''
-        env:
-          GH_TOKEN: ${{ secrets.ACTION_PAT }}
-          TAG: ${{ needs.create-draft.outputs.tag }}
-        run: |
-          echo "正在通过重新打标签来隐藏源代码包..."
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git push origin --delete "$TAG"
-          git tag -d "$TAG"
-          git tag "$TAG"
-          git push -f origin "$TAG"
