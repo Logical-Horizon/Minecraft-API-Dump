@@ -9,27 +9,21 @@ permissions:
   contents: write
 
 jobs:
-  # 任务 1: 创建草稿 Release
   create-draft:
     runs-on: ubuntu-latest
     outputs:
       tag: weekly-${{ env.TAG_DATE }}
     steps:
-      - name: 检出仓库代码
-        uses: actions/checkout@v4
-      - name: 获取当前日期
-        id: date
+      - uses: actions/checkout@v4
+      - id: date
         run: echo "TAG_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-      - name: 清理上一次失败的运行残留
-        env:
+      - env:
           GH_TOKEN: ${{ secrets.ACTION_PAT }}
         run: |
           TAG="weekly-${{ env.TAG_DATE }}"
-          echo "正在检查并删除已存在的标签: $TAG"
           gh release delete "$TAG" --yes || echo "无需删除旧的 Release。"
           git push origin --delete "$TAG" || echo "无需删除旧的 Git 标签。"
-      - name: 创建 Release 草稿
-        id: create_release
+      - id: create_release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ env.TAG_DATE }}
@@ -42,91 +36,75 @@ jobs:
           draft: true
           token: ${{ secrets.ACTION_PAT }}
 
-  # ===================================================================
-  # 任务 2: 并行处理 Forge (已重构为并行下载)
-  # ===================================================================
   process-forge:
     runs-on: ubuntu-latest
     needs: create-draft
     continue-on-error: true
     steps:
-      - name: 检出仓库代码
-        uses: actions/checkout@v4
-      - name: 安装并行下载工具
-        run: sudo apt-get update && sudo apt-get install -y aria2
-      - name: 增量处理并上传 Forge 文件 (并行下载模式)
-        env:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y aria2
+      - env:
           GH_TOKEN: ${{ secrets.ACTION_PAT }}
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
-          echo "--- 开始增量处理 Forge (并行下载模式) ---"
           SIZE_LIMIT=2147483648
           INDEX_PAGES=$(curl -s https://files.minecraftforge.net/net/minecraftforge/forge/ | grep -oP 'href="(index_[^"]+\.html)"' | sed 's/href="\([^"]*\)"/\1/')
           for page in $INDEX_PAGES; do
             MC_VERSION=$(echo "$page" | sed -e 's/index_//' -e 's/\.html//')
-            echo "--- 正在处理 Forge (MC 版本: $MC_VERSION) ---"
             TEMP_DIR="forge_temp_${MC_VERSION}"
             URL_LIST="urls_forge.txt"
             mkdir -p "$TEMP_DIR"
-            
             PAGE_URL="https://files.minecraftforge.net/net/minecraftforge/forge/$page"
-            # 收集该版本的所有下载链接
             curl -s "$PAGE_URL" | grep -oP 'https://adfoc\.us/serve/sitelinks/[^"]+' | grep -iE 'installer|mdk|universal' | sort -u | sed -n 's/.*url=\(.*\)/\1/p' > "$URL_LIST"
-
-            if [ ! -s "$URL_LIST" ]; then echo "版本 $MC_VERSION 未找到任何链接，跳过。"; rm -rf "$TEMP_DIR"; continue; fi
-            
-            echo "开始并行下载 $MC_VERSION 的所有文件..."
+            if [ ! -s "$URL_LIST" ]; then rm -rf "$TEMP_DIR"; continue; fi
             aria2c --console-log-level=warn -c -x 16 -s 16 --async-dns=false --show-console-readout=false -d "$TEMP_DIR" -i "$URL_LIST"
-            
-            if [ -z "$(ls -A "$TEMP_DIR")" ]; then echo "版本 $MC_VERSION 未下载到任何文件，跳过。"; rm -rf "$TEMP_DIR" "$URL_LIST"; continue; fi
+            if [ -z "$(ls -A "$TEMP_DIR")" ]; then rm -rf "$TEMP_DIR" "$URL_LIST"; continue; fi
             ARCHIVE_NAME="forge-${MC_VERSION}.tar.xz"
-            echo "正在归档至 $ARCHIVE_NAME"
             tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
             ARCHIVE_SIZE=$(stat -c%s "$ARCHIVE_NAME")
             if [ "$ARCHIVE_SIZE" -gt "$SIZE_LIMIT" ]; then
-              echo "归档文件大小 ($ARCHIVE_SIZE 字节) 已超过 2.0 GiB 上限。正在进行分片..."
               split -b 2000M --numeric-suffixes=1 --suffix-length=2 "$ARCHIVE_NAME" "${ARCHIVE_NAME}.part"
-              echo "正在上传分片文件..."
               for part in ${ARCHIVE_NAME}.part*; do
                 mv "$part" "${part}.txz"
-                echo "  -> 正在上传 ${part}.txz"
                 gh release upload "$TAG" "${part}.txz" --clobber
               done
             else
-              echo "归档文件大小在限制范围内。直接上传..."
               gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
             fi
-            echo "正在清理版本 $MC_VERSION 的本地文件..."
             rm -rf "$TEMP_DIR" "${ARCHIVE_NAME}"* "$URL_LIST"
           done
 
-  # 任务 3: 并行处理 Fabric (无改动)
   process-fabric:
     runs-on: ubuntu-latest
     needs: create-draft
     continue-on-error: true
     steps:
-      - name: 检出仓库代码
-        uses: actions/checkout@v4
-      - name: 增量处理并上传 Fabric 文件
-        env:
+      - uses: actions/checkout@v4
+      - env:
           GH_TOKEN: ${{ secrets.ACTION_PAT }}
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
-          echo "--- 开始增量处理 Fabric (Maven 模式) ---"
-          echo "正在处理 Fabric Installer..."
+          SIZE_LIMIT=2147483648
           INSTALLER_VERSION=$(curl -s https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml | grep -oP '<latest>\K[^<]+')
           INSTALLER_URL="https://maven.fabricmc.net/net/fabricmc/fabric-installer/${INSTALLER_VERSION}/fabric-installer-${INSTALLER_VERSION}.jar"
           TEMP_DIR_INSTALLER="fabric_installer_temp"
           mkdir -p "$TEMP_DIR_INSTALLER"
           wget -nv -P "$TEMP_DIR_INSTALLER/" "$INSTALLER_URL"
-          if [ -z "$(ls -A "$TEMP_DIR_INSTALLER")" ]; then echo "Fabric Installer 下载失败，跳过。"; else
+          if [ -n "$(ls -A "$TEMP_DIR_INSTALLER")" ]; then
              ARCHIVE_NAME_INSTALLER="fabric-installer.tar.xz"
              tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME_INSTALLER" -C "$TEMP_DIR_INSTALLER" .
-             gh release upload "$TAG" "$ARCHIVE_NAME_INSTALLER" --clobber
-             rm -rf "$TEMP_DIR_INSTALLER" "$ARCHIVE_NAME_INSTALLER"
+             ARCHIVE_SIZE=$(stat -c%s "$ARCHIVE_NAME_INSTALLER")
+             if [ "$ARCHIVE_SIZE" -gt "$SIZE_LIMIT" ]; then
+                split -b 2000M --numeric-suffixes=1 --suffix-length=2 "$ARCHIVE_NAME_INSTALLER" "${ARCHIVE_NAME_INSTALLER}.part"
+                for part in ${ARCHIVE_NAME_INSTALLER}.part*; do
+                  mv "$part" "${part}.txz"
+                  gh release upload "$TAG" "${part}.txz" --clobber
+                done
+             else
+                gh release upload "$TAG" "$ARCHIVE_NAME_INSTALLER" --clobber
+             fi
+             rm -rf "$TEMP_DIR_INSTALLER" "${ARCHIVE_NAME_INSTALLER}"*
           fi
-          echo "--- 开始分组处理 Fabric API (来自 Maven) ---"
           API_MAVEN_URL="https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/"
           ALL_VERSIONS=$(curl -s "${API_MAVEN_URL}maven-metadata.xml" | grep -oP '<version>\K[^<]+')
           MC_VERSION_GROUPS=$(echo "$ALL_VERSIONS" | grep -oP '\+\K\d+\.\d+\.?\d*' | sort -u)
@@ -135,35 +113,39 @@ jobs:
             mkdir -p "$TEMP_DIR_API"
             for FULL_VERSION in $(echo "$ALL_VERSIONS" | grep "+${GROUP}"); do
               API_URL="${API_MAVEN_URL}${FULL_VERSION}/fabric-api-${FULL_VERSION}.jar"
-              wget -nv -P "$TEMP_DIR_API/" "$API_URL" || echo "     - 下载失败: API for $FULL_VERSION"
+              wget -nv -P "$TEMP_DIR_API/" "$API_URL" || true
             done
             if [ -z "$(ls -A "$TEMP_DIR_API")" ]; then rm -rf "$TEMP_DIR_API"; continue; fi
             ARCHIVE_NAME_API="fabric-api-${GROUP}.tar.xz"
             tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME_API" -C "$TEMP_DIR_API" .
-            gh release upload "$TAG" "$ARCHIVE_NAME_API" --clobber
-            rm -rf "$TEMP_DIR_API" "$ARCHIVE_NAME_API"
+            ARCHIVE_SIZE=$(stat -c%s "$ARCHIVE_NAME_API")
+            if [ "$ARCHIVE_SIZE" -gt "$SIZE_LIMIT" ]; then
+              split -b 2000M --numeric-suffixes=1 --suffix-length=2 "$ARCHIVE_NAME_API" "${ARCHIVE_NAME_API}.part"
+              for part in ${ARCHIVE_NAME_API}.part*; do
+                mv "$part" "${part}.txz"
+                gh release upload "$TAG" "${part}.txz" --clobber
+              done
+            else
+              gh release upload "$TAG" "$ARCHIVE_NAME_API" --clobber
+            fi
+            rm -rf "$TEMP_DIR_API" "${ARCHIVE_NAME_API}"*
           done
 
-  # 任务 4: 并行处理 NeoForge (无改动)
   process-neoforge:
     runs-on: ubuntu-latest
     needs: create-draft
     continue-on-error: true
     steps:
-      - name: 检出仓库代码
-        uses: actions/checkout@v4
-      - name: 安装并行下载工具
-        run: sudo apt-get update && sudo apt-get install -y aria2
-      - name: 增量处理并上传 NeoForge 文件 (并行下载模式)
-        env:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y aria2
+      - env:
           GH_TOKEN: ${{ secrets.ACTION_PAT }}
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
-          echo "--- 开始分组处理 NeoForge (并行下载模式) ---"
+          SIZE_LIMIT=2147483648
           ALL_VERSIONS=$(curl -s "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml" | grep -oP '<version>\K[^<]+')
           VERSION_GROUPS=$(echo "$ALL_VERSIONS" | cut -d'.' -f1,2 | sort -u)
           for GROUP in $VERSION_GROUPS; do
-            echo "--- 正在处理 NeoForge 分组: $GROUP ---"
             TEMP_DIR="neoforge_temp_${GROUP}"
             URL_LIST="urls_neoforge.txt"
             mkdir -p "$TEMP_DIR"
@@ -174,41 +156,31 @@ jobs:
               echo "$INSTALLER_URL" >> "$URL_LIST"
               echo "$UNIVERSAL_URL" >> "$URL_LIST"
             done
-            if [ ! -s "$URL_LIST" ]; then echo "分组 $GROUP 未找到任何链接，跳过。"; rm -rf "$TEMP_DIR"; continue; fi
-            echo "开始并行下载分组 $GROUP 的所有文件..."
+            if [ ! -s "$URL_LIST" ]; then rm -rf "$TEMP_DIR"; continue; fi
             aria2c --console-log-level=warn -c -x 16 -s 16 --async-dns=false --show-console-readout=false -d "$TEMP_DIR" -i "$URL_LIST"
-            if [ -z "$(ls -A "$TEMP_DIR")" ]; then echo "分组 $GROUP 未下载到任何文件，跳过。"; rm -rf "$TEMP_DIR" "$URL_LIST"; continue; fi
+            if [ -z "$(ls -A "$TEMP_DIR")" ]; then rm -rf "$TEMP_DIR" "$URL_LIST"; continue; fi
             ARCHIVE_NAME="neoforge-${GROUP}.tar.xz"
-            echo "正在归档至 $ARCHIVE_NAME"
+            tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
+            ARCHIVE_SIZE=$(stat -c%s "$ARCHIVE_NAME")
             if [ "$ARCHIVE_SIZE" -gt "$SIZE_LIMIT" ]; then
-              echo "归档文件大小 ($ARCHIVE_SIZE 字节) 已超过 2.0 GiB 上限。正在进行分片..."
               split -b 2000M --numeric-suffixes=1 --suffix-length=2 "$ARCHIVE_NAME" "${ARCHIVE_NAME}.part"
-              echo "正在上传分片文件..."
               for part in ${ARCHIVE_NAME}.part*; do
                 mv "$part" "${part}.txz"
-                echo "  -> 正在上传 ${part}.txz"
                 gh release upload "$TAG" "${part}.txz" --clobber
               done
             else
-              echo "归档文件大小在限制范围内。直接上传..."
               gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
             fi
-            gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
-            rm -rf "$TEMP_DIR" "$ARCHIVE_NAME" "$URL_LIST"
+            rm -rf "$TEMP_DIR" "${ARCHIVE_NAME}"* "$URL_LIST"
           done
 
-  # ===================================================================
-  # 任务 5: 最终发布 (已移除隐藏源代码的步骤)
-  # ===================================================================
   publish-release:
     runs-on: ubuntu-latest
     if: always()
     needs: [create-draft, process-forge, process-fabric, process-neoforge]
     steps:
-      - name: 检出仓库代码
-        uses: actions/checkout@v4
-      - name: 检查失败并打包日志
-        id: check_failure
+      - uses: actions/checkout@v4
+      - id: check_failure
         env:
           GH_TOKEN: ${{ secrets.ACTION_PAT }}
         run: |
@@ -217,26 +189,21 @@ jobs:
           if [ "${{ needs.process-fabric.result }}" == "failure" ]; then HAS_FAILURE=true; fi
           if [ "${{ needs.process-neoforge.result }}" == "failure" ]; then HAS_FAILURE=true; fi
           if [ "$HAS_FAILURE" = true ]; then
-            echo "检测到任务失败。正在下载日志..."
             gh run view ${{ github.run_id }} --log-failed > all-errors.log
             tar -czvf error.tgz all-errors.log
             echo "error_package_created=true" >> $GITHUB_OUTPUT
             echo "release_name=${{ needs.create-draft.outputs.tag }} (部分成功/失败)" >> $GITHUB_OUTPUT
           else
-            echo "所有任务均已成功。"
             echo "error_package_created=false" >> $GITHUB_OUTPUT
             echo "release_name=${{ needs.create-draft.outputs.tag }}" >> $GITHUB_OUTPUT
           fi
-      - name: 如果存在错误日志则上传
-        if: steps.check_failure.outputs.error_package_created == 'true'
+      - if: steps.check_failure.outputs.error_package_created == 'true'
         env:
           GH_TOKEN: ${{ secrets.ACTION_PAT }}
           TAG: ${{ needs.create-draft.outputs.tag }}
         run: |
-          echo "正在上传 error.tgz..."
           gh release upload "$TAG" error.tgz --clobber
-      - name: 发布最终的 Release
-        id: publish
+      - id: publish
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ steps.check_failure.outputs.release_name }}
