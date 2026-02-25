@@ -180,7 +180,19 @@ jobs:
             if [ -z "$(ls -A "$TEMP_DIR")" ]; then echo "分组 $GROUP 未下载到任何文件，跳过。"; rm -rf "$TEMP_DIR" "$URL_LIST"; continue; fi
             ARCHIVE_NAME="neoforge-${GROUP}.tar.xz"
             echo "正在归档至 $ARCHIVE_NAME"
-            tar --use-compress-program="xz -T0" -cvf "$ARCHIVE_NAME" -C "$TEMP_DIR" .
+            if [ "$ARCHIVE_SIZE" -gt "$SIZE_LIMIT" ]; then
+              echo "归档文件大小 ($ARCHIVE_SIZE 字节) 已超过 2.0 GiB 上限。正在进行分片..."
+              split -b 2000M --numeric-suffixes=1 --suffix-length=2 "$ARCHIVE_NAME" "${ARCHIVE_NAME}.part"
+              echo "正在上传分片文件..."
+              for part in ${ARCHIVE_NAME}.part*; do
+                mv "$part" "${part}.txz"
+                echo "  -> 正在上传 ${part}.txz"
+                gh release upload "$TAG" "${part}.txz" --clobber
+              done
+            else
+              echo "归档文件大小在限制范围内。直接上传..."
+              gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
+            fi
             gh release upload "$TAG" "$ARCHIVE_NAME" --clobber
             rm -rf "$TEMP_DIR" "$ARCHIVE_NAME" "$URL_LIST"
           done
